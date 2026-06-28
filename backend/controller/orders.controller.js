@@ -30,13 +30,18 @@ const orderController = async (req, res) => {
  */
 const costController = async (req, res) => {
     try {
+        const store_id = req.storeId;
         const { jobId, cost } = req.body;
         if (!jobId || cost === undefined) {
             return res.status(400).json({ success: false, message: "jobId and cost are required" });
         }
-        const result = await costService(jobId, parseFloat(cost));
+        // Pass storeId to enforce tenant ownership
+        const result = await costService(jobId, parseFloat(cost), store_id);
         if (result.status === 200) {
             return res.status(200).json({ success: true, message: "Cost updated" });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
         return res.status(result.status || 500).json({ success: false, message: "Update failed" });
     } catch (error) {
@@ -51,11 +56,13 @@ const costController = async (req, res) => {
  */
 const updateStatusController = async (req, res) => {
     try {
+        const store_id = req.storeId;
         const { jobId, status } = req.body;
         if (!jobId || !status) {
             return res.status(400).json({ success: false, message: "jobId and status are required" });
         }
-        const result = await updateStatusService(jobId, status);
+        // Pass storeId to enforce tenant ownership
+        const result = await updateStatusService(jobId, status, store_id);
         if (result.status === 200) {
             return res.status(200).json({ success: true, message: "Status updated" });
         }
@@ -78,11 +85,13 @@ const updateStatusController = async (req, res) => {
  */
 const getJobFilesController = async (req, res) => {
     try {
+        const store_id = req.storeId;
         const { jobId } = req.params;
         if (!jobId) {
             return res.status(400).json({ success: false, message: "jobId is required" });
         }
-        const result = await getJobFilesService(jobId);
+        // Pass storeId to enforce tenant ownership
+        const result = await getJobFilesService(jobId, store_id);
         return res.status(200).json({ files: result.files });
     } catch (error) {
         console.error("getJobFilesController error:", error);

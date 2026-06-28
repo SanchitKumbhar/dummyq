@@ -7,7 +7,6 @@ const cookieParser = require("cookie-parser");
 
 const { createClient } = require("redis");
 const { createAdapter } = require("@socket.io/redis-adapter");
-const { Queue } = require("bullmq");
 
 const pendingJobsSync = require("./router/pending.sync.route");
 const printwebhook = require("./router/print.webhook.route");
@@ -29,12 +28,10 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
-// ---- Socket.IO (CORS open for Electron localhost) ----
+// ---- Socket.IO ----
 const io = require("socket.io")(server, {
     cors: { origin: "*" }
 });
-
-// Expose io on app for controllers to use
 app.set("io", io);
 
 // ---- MIDDLEWARE ----
@@ -43,50 +40,30 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ---- STATIC FILE SERVING (for uploaded print files) ----
+// ---- STATIC FILES (uploaded print files) ----
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use("/worker-uploads", express.static(path.join(__dirname, "workers", "uploads")));
 
-// ---- SOCKET.IO CONNECTION ----
+// ---- SOCKET.IO ----
 io.on("connection", (socket) => {
     console.log("Socket connected:", socket.id);
-
     socket.on("register-store", ({ storeId }) => {
         socket.join(`store-${storeId}`);
         console.log(`Socket ${socket.id} joined room store-${storeId}`);
     });
-
     socket.on("disconnect", (reason) => {
         console.log("Socket disconnected:", socket.id, reason);
     });
 });
 
-// ---- REDIS CONFIG ----
-const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
-
-const pubClient = createClient({ url: redisUrl });
-const subClient = createClient({ url: redisUrl });
-const eventSubscriber = createClient({ url: redisUrl });
-
-pubClient.on("error", (err) => console.error("pubClient Redis Error:", err.message));
-subClient.on("error", (err) => console.error("subClient Redis Error:", err.message));
-eventSubscriber.on("error", (err) => console.error("eventSubscriber Redis Error:", err.message));
-
-// ---- BULLMQ ----
-const messageQueue = new Queue("whatsapp-jobs", {
-    connection: { url: redisUrl, maxRetriesPerRequest: null }
-});
-
-app.set("messageQueue", messageQueue);
-
 // ---- DATABASE INIT ----
 function runDbStatement(sql) {
     return new Promise((resolve) => {
         db.run(sql, (err) => {
-            if (err && !err.message.includes("duplicate column")) {
-                console.warn("DB statement warning:", err.message.substring(0, 80));
+            if (err && !err.message.includes("duplicate column") && !err.message.includes("already exists")) {
+                console.warn("DB:", err.message.substring(0, 100));
             }
-            resolve(); // Always resolve — schema already exists is fine
+            resolve();
         });
     });
 }
@@ -96,13 +73,10 @@ async function initDatabase() {
     await runDbStatement(createjobtable);
     await runDbStatement(createjobfilestable);
     await runDbStatement(createcustomertable);
-
-    // Run column migrations (ALTER TABLE — SQLite ignores duplicate column errors)
     for (const migration of migrations) {
         await runDbStatement(migration);
     }
-
-    console.log("Database schema initialized.");
+    console.log("Database ready.");
 }
 
 // ---- ROUTES ----
@@ -112,22 +86,17 @@ app.use("/api/user-auth", userRoutes);
 app.use("/api/orders", orderRoute);
 app.use("/api/print-job", printwebhook);
 
-// ---- WHATSAPP WEBHOOK VERIFICATION (Meta / Cloud API) ----
+// ---- META WEBHOOK VERIFICATION ----
 app.get("/webhook", (req, res) => {
     const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "inkspool";
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
-
+    const { "hub.mode": mode, "hub.verify_token": token, "hub.challenge": challenge } = req.query;
     if (mode === "subscribe" && token === VERIFY_TOKEN) {
-        console.log("Meta webhook verified.");
         res.status(200).send(challenge);
     } else {
         res.sendStatus(403);
     }
 });
 
-// ---- WHATSAPP WEBHOOK (Meta / Cloud API) ----
 app.post("/webhook", async (req, res) => {
     try {
         const body = req.body;
@@ -137,9 +106,15 @@ app.post("/webhook", async (req, res) => {
                 if (changes?.messages?.length > 0) {
                     const message = changes.messages[0];
                     const senderPhone = changes.contacts?.[0]?.wa_id;
-                    console.log(`WhatsApp message type=${message.type} from ${senderPhone}`);
-                    // Route to BullMQ for async processing
-                    // await messageQueue.add("process-meta-message", { payload: changes, storeId: 1 });
+                    console.log(`WhatsApp ${message.type} from ${senderPhone}`);
+
+                    const mq = req.app.get("messageQueue");
+                    if (mq) {
+                        await mq.add("process-meta-message", {
+                            payload: changes,
+                            storeId: 1
+                        });
+                    }
                 }
             }
             res.sendStatus(200);
@@ -153,55 +128,81 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ---- HEALTH CHECK ----
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ---- START SERVER ----
-const PORT = process.env.PORT || 5000;
+// ---- TRY REDIS (one-shot, no auto-reconnect) ----
+async function tryConnectRedis() {
+    const redisUrl = process.env.REDIS_URL || "redis://127.0.0.1:6379";
 
-async function startServer() {
-    // 1. Init DB schema first
-    await initDatabase();
+    // reconnectStrategy: false = no retries, just fail fast
+    const makeClient = () => createClient({
+        url: redisUrl,
+        socket: { reconnectStrategy: false }
+    });
 
-    // 2. Try Redis — degrade gracefully if unavailable
-    let redisAvailable = false;
+    const pubClient   = makeClient();
+    const subClient   = makeClient();
+    const evtClient   = makeClient();
+
+    pubClient.on("error", () => {});
+    subClient.on("error", () => {});
+    evtClient.on("error", () => {});
+
     try {
         await Promise.all([
             pubClient.connect(),
             subClient.connect(),
-            eventSubscriber.connect()
+            evtClient.connect()
         ]);
-        console.log("Redis connected successfully.");
 
-        // Enable Redis adapter for Socket.IO (multi-instance support)
+        // Wire Socket.IO Redis adapter
         io.adapter(createAdapter(pubClient, subClient));
-        console.log("Socket.IO Redis adapter ready.");
 
-        // Bridge Redis pub/sub → Socket.IO room events
-        await eventSubscriber.subscribe("store-events", (message) => {
+        // Bridge Redis events → Socket.IO rooms
+        await evtClient.subscribe("store-events", (message) => {
             try {
                 const { storeId, event, data } = JSON.parse(message);
-                console.log(`Emitting '${event}' to room store-${storeId}`);
                 io.to(`store-${storeId}`).emit(event, data);
-            } catch (err) {
-                console.error("Redis bridge parse error:", err);
+            } catch (e) {
+                console.error("Redis bridge error:", e.message);
             }
         });
 
-        redisAvailable = true;
-    } catch (err) {
-        console.warn("Redis unavailable — running Socket.IO in standalone mode:", err.message);
-    }
+        // BullMQ Queue — only when Redis is available
+        const { Queue } = require("bullmq");
+        const messageQueue = new Queue("whatsapp-jobs", {
+            connection: {
+                url: redisUrl,
+                maxRetriesPerRequest: null,
+                enableReadyCheck: false
+            }
+        });
+        app.set("messageQueue", messageQueue);
 
-    // 3. Start HTTP server
-    server.listen(PORT, () => {
-        console.log(`PrintFlow backend running on http://localhost:${PORT}`);
-        console.log(`Redis: ${redisAvailable ? "connected" : "offline (standalone mode)"}`);
-    });
+        console.log("Redis connected. Socket.IO adapter + BullMQ ready.");
+        return true;
+    } catch (err) {
+        console.warn(`Redis unavailable (${err.message}). Running in standalone mode — real-time via direct Socket.IO only.`);
+        app.set("messageQueue", null);
+        return false;
+    }
 }
 
-startServer().catch((err) => {
-    console.error("Fatal startup error:", err);
-    process.exit(1);
-});
+// ---- START ----
+const PORT = process.env.PORT || 5000;
+
+(async () => {
+    try {
+        await initDatabase();
+        await tryConnectRedis();
+
+        server.listen(PORT, () => {
+            console.log(`PrintFlow backend running on http://localhost:${PORT}`);
+        });
+    } catch (err) {
+        console.error("Fatal startup error:", err);
+        process.exit(1);
+    }
+})();

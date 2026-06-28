@@ -30,15 +30,21 @@ function ordersService(store_id) {
     });
 }
 
-async function costService(jobId, cost) {
+// storeId is always required to prevent cross-tenant access (IDOR)
+async function costService(jobId, cost, storeId) {
     return new Promise((resolve, reject) => {
         db.run(
-            `UPDATE print_jobs SET cost_of_job = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?`,
-            [cost, jobId],
-            (err) => {
+            `UPDATE print_jobs
+             SET cost_of_job = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE job_id = ? AND store_id = ?`,
+            [cost, jobId, storeId],
+            function (err) {
                 if (err) {
                     console.error("costService error:", err);
                     return reject(err);
+                }
+                if (this.changes === 0) {
+                    return resolve({ status: 404, message: "Job not found or access denied" });
                 }
                 return resolve({ status: 200 });
             }
@@ -46,22 +52,24 @@ async function costService(jobId, cost) {
     });
 }
 
-async function updateStatusService(jobId, status) {
+async function updateStatusService(jobId, status, storeId) {
     const validStatuses = ["pending", "printing", "paused", "completed", "cancelled"];
     if (!validStatuses.includes(status)) {
         return { status: 400, message: "Invalid status value" };
     }
     return new Promise((resolve, reject) => {
         db.run(
-            `UPDATE print_jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?`,
-            [status, jobId],
+            `UPDATE print_jobs
+             SET status = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE job_id = ? AND store_id = ?`,
+            [status, jobId, storeId],
             function (err) {
                 if (err) {
                     console.error("updateStatusService error:", err);
                     return reject(err);
                 }
                 if (this.changes === 0) {
-                    return resolve({ status: 404, message: "Job not found" });
+                    return resolve({ status: 404, message: "Job not found or access denied" });
                 }
                 return resolve({ status: 200 });
             }
@@ -69,13 +77,15 @@ async function updateStatusService(jobId, status) {
     });
 }
 
-async function getJobFilesService(jobId) {
+async function getJobFilesService(jobId, storeId) {
     return new Promise((resolve, reject) => {
+        // JOIN with print_jobs to enforce tenant ownership
         db.all(
-            `SELECT id, job_id, file_name, file_path, file_type, pages
-             FROM print_job_files
-             WHERE job_id = ?`,
-            [jobId],
+            `SELECT f.id, f.job_id, f.file_name, f.file_path, f.file_type, f.pages
+             FROM print_job_files f
+             INNER JOIN print_jobs j ON j.job_id = f.job_id
+             WHERE f.job_id = ? AND j.store_id = ?`,
+            [jobId, storeId],
             (err, rows) => {
                 if (err) {
                     console.error("getJobFilesService error:", err);

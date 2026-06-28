@@ -1,0 +1,1 @@
+- [PrintFlow integration](printflow-integration.md) — full backend-frontend integration; 8 bugs fixed; tenant IDOR patched; Redis optional

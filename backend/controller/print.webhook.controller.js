@@ -11,6 +11,12 @@ const receiveWebhook = async (req, res) => {
 
         const messageQueue = req.app.get("messageQueue");
 
+        // messageQueue is null when Redis is unavailable (standalone mode)
+        if (!messageQueue) {
+            console.warn("Webhook received but BullMQ unavailable — processing synchronously skipped.");
+            return res.status(200).json({ success: true, message: "Webhook received. Queue unavailable — configure Redis for async processing." });
+        }
+
         await messageQueue.add("process-message", { payload }, { jobId });
 
         return res.status(200).json({ success: true, message: "Webhook accepted and queued." });
