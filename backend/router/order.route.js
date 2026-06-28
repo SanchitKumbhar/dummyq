@@ -1,10 +1,20 @@
-const {orderController}=require("../controller/orders.controller");
-const {costController}=require("../controller/orders.controller");
-const express=require("express");
-const middleware=require("../middleware/auth.middleware")
-const router=express.Router();
+const express = require("express");
+const middleware = require("../middleware/auth.middleware");
+const {
+    orderController,
+    costController,
+    updateStatusController,
+    getJobFilesController,
+    createManualJobController
+} = require("../controller/orders.controller");
 
-router.get("/v1/get-order",middleware,orderController);
-router.patch("/v1/cost-order",costController);
+const router = express.Router();
 
-module.exports=router;
+// All order routes require authentication
+router.get("/v1/get-order", middleware, orderController);
+router.patch("/v1/cost-order", middleware, costController);
+router.patch("/v1/update-status", middleware, updateStatusController);
+router.get("/v1/files/:jobId", middleware, getJobFilesController);
+router.post("/v1/create-manual-job", middleware, createManualJobController);
+
+module.exports = router;

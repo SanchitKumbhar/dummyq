@@ -1,21 +1,15 @@
 const pendingJobsSyncService = require("../service/pending.job.service");
+
 const pendingJobsSync = async (req, res) => {
     try {
-        const { storeId } = req.storeId;
+        // FIX: was const { storeId } = req.storeId — storeId is a scalar, not object
+        const storeId = req.storeId;
         const jobs = await pendingJobsSyncService(storeId);
-
-        console.log(jobs);
-        return res.status(200).json({ jobs: jobs });
-
+        return res.status(200).json({ jobs });
     } catch (error) {
-        console.error(error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Internal Server Error"
-        });
+        console.error("pendingJobsSync error:", error);
+        return res.status(500).json({ success: false, message: "Internal Server Error" });
     }
+};
 
-}
-
-module.exports=pendingJobsSync;
+module.exports = pendingJobsSync;

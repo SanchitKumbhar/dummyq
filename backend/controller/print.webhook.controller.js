@@ -1,46 +1,39 @@
-const { create } = require("node:domain");
-const {
-    processIncomingMessage
-} = require("../service/print.webhook.service.js");
+const { processIncomingMessage } = require("../service/print.webhook.service.js");
 const jobService = require("../service/jobs.service.js");
 
+/**
+ * Webhook receiver — fast hand-off to BullMQ queue
+ */
 const receiveWebhook = async (req, res) => {
     try {
         const payload = req.body;
         const jobId = payload.MessageSid;
 
-        // Pull the message queue out of your express app state
         const messageQueue = req.app.get("messageQueue");
-        console.log("checked")
-        // Fast Hand-off to the Redis Queue
-        await messageQueue.add('process-message', { payload }, { jobId: jobId });
 
-        // Tell Twilio everything is OK right away
+        await messageQueue.add("process-message", { payload }, { jobId });
+
         return res.status(200).json({ success: true, message: "Webhook accepted and queued." });
     } catch (error) {
-        console.error("Webhook processing failure:", error);
+        console.error("receiveWebhook error:", error);
         return res.status(500).json({ error: "Internal Server Error" });
     }
 };
 
-const printJobsController = (async (req, res) => {
+/**
+ * Get print jobs for authenticated store
+ * FIX: was const { store_id } = req.storeId (wrong destructure) and used undefined `data`
+ */
+const printJobsController = async (req, res) => {
     try {
-        const { store_id } = req.storeId;
-        const jobs = await jobService(store_id);
-        return res.status(200).json({ data: data });
+        const store_id = req.storeId;
+        const result = await jobService(store_id);
+        return res.status(200).json({ data: result.jobs });
+    } catch (error) {
+        console.error("printJobsController error:", error);
+        return res.status(500).json({ success: false, message: "Internal Server Error" });
     }
-    catch (error) {
-        console.error(error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Internal Server Error"
-        });
-    }
-})
-
-
-
+};
 
 module.exports = {
     receiveWebhook,

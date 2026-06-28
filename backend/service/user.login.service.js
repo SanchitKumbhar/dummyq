@@ -1,87 +1,64 @@
 const db = require("../config/sqlite.config");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+require("dotenv").config();
 
-async function generateToken(id, phoneNumber) {
-
+async function generateToken(storeId, phoneNumber) {
     const payload = {
-        storeId: id,
+        storeId: storeId,
         phoneNumber: phoneNumber
     };
-
-    // 4. Generate and sign the token
     const token = jwt.sign(
         payload,
         process.env.JWT_SECRET,
-        { expiresIn: process.env.JWT_EXPIRES_IN || '5h' }
+        { expiresIn: process.env.JWT_EXPIRES_IN || "5h" }
     );
-
     return token;
-
 }
 
 async function checkPassword(plainPassword, hashedPassword) {
     return bcrypt.compare(plainPassword, hashedPassword);
 }
 
-async function getPassword(password, phoneNumber) {
+async function getStoreByPhone(phoneNumber) {
     return new Promise((resolve, reject) => {
         db.get(
-            `SELECT store_id, store_name, password
-             FROM stores
-             WHERE phone_number = ?`,
+            `SELECT store_id, store_name, password FROM stores WHERE phone_number = ?`,
             [phoneNumber],
-            async (err, user) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-
-                if (!user) {
-                    resolve(null);
-                    return;
-                }
-
-                const result = await checkPassword(password, user.password);
-
-                if (result) {
-                    resolve(user);
-                    return;
-                }
-
-                resolve(false);
+            (err, user) => {
+                if (err) return reject(err);
+                resolve(user || null);
             }
         );
     });
-
 }
 
 async function userloginService(phoneNumber, password) {
     try {
-        const result = await getPassword(password, phoneNumber);
+        const user = await getStoreByPhone(phoneNumber);
 
-        if (!result) {
-            return {
-                status: 401,
-                message: "Invalid phone number or password"
-            };
+        if (!user) {
+            return { status: 401, message: "Invalid phone number or password" };
         }
 
-        const token = await generateToken(result.id, phoneNumber);
+        const passwordMatch = await checkPassword(password, user.password);
+        if (!passwordMatch) {
+            return { status: 401, message: "Invalid phone number or password" };
+        }
+
+        // FIX: was result.id — SQLite returns store_id
+        const token = await generateToken(user.store_id, phoneNumber);
 
         return {
             status: 201,
-            token
+            token,
+            storeId: user.store_id,
+            storeName: user.store_name
         };
     } catch (error) {
-        console.error(error);
-
-        return {
-            status: 500,
-            message: "Database error"
-        };
+        console.error("Login service error:", error);
+        return { status: 500, message: "Database error" };
     }
-
 }
 
 module.exports = userloginService;
